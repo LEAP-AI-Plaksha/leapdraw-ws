@@ -111,8 +111,14 @@ async def handle_connection(websocket, path):
                         # Pad the image to make it square
                         img = pad_image_to_square(img)
 
-                        # Save the padded image for debugging
-                        img.save("padded_image.png")
+                        # Ensure that all pixels that are non-black become white
+                        img_array = np.array(img)
+                        mask = (img_array != [0, 0, 0]).any(axis=2)
+                        img_array[mask] = [255, 255, 255]
+                        img = Image.fromarray(img_array)
+
+                        # Save the processed image for debugging
+                        img.save("processed_image.png")
 
                         # Run the ML model inference
                         try:
