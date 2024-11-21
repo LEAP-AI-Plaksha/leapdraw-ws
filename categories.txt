@@ -1,0 +1,10 @@
+airplane
+apple
+bicycle
+cake
+cat
+dog
+fish
+house
+tree
+star
