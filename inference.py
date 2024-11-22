@@ -44,7 +44,6 @@ def preprocess_image(img):
 
     # Expand dimensions
     img_expanded = np.expand_dims(img_normalized, axis=(0, -1))
-
     return img_expanded
 
 def predict_from_image(model_path, img, categories_file='categories.txt'):
@@ -62,16 +61,18 @@ def predict_from_image(model_path, img, categories_file='categories.txt'):
 
     # Preprocess the image
     preprocessed_image = preprocess_image(img)
+    # save np arr as image
+    
     preprocessed_image = preprocessed_image.astype(input_dtype)
 
     # Run inference
     interpreter.set_tensor(input_details[0]['index'], preprocessed_image)
     interpreter.invoke()
-
+    
     # Get predictions
     output_details = interpreter.get_output_details()
     predictions = interpreter.get_tensor(output_details[0]['index'])
-
+    # print(predictions)
     predicted_index = np.argmax(predictions, axis=1)[0]
     confidence = predictions[0][predicted_index]
     predicted_category = categories[predicted_index]

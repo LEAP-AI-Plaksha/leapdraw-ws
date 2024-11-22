@@ -7,8 +7,6 @@ import numpy as np
 from io import BytesIO
 from inference import predict_from_image, pad_image_to_square  # Import your ML model inference function
 import random
-from PIL import Image, ImageOps
-
 
 # Load all possible prompts
 with open('categories.txt', 'r') as f:
@@ -16,7 +14,6 @@ with open('categories.txt', 'r') as f:
 
 # Dictionary to store rooms and their game state
 rooms = {}
-
 
 async def handle_connection(websocket, path):
     print("New client connected")
@@ -28,6 +25,7 @@ async def handle_connection(websocket, path):
                 data = json.loads(message)
                 action = data.get("action")
                 room_id = data.get("roomId")
+                print(action, room_id)
 
                 if action == "createRoom" and room_id:
                     # Handle room creation
@@ -43,7 +41,8 @@ async def handle_connection(websocket, path):
                         }
                         await websocket.send(json.dumps({
                             "status": "success",
-                            "message": f"Room {room_id} created successfully"
+                            "message": f"Room {room_id} created successfully",
+                            "roomId": room_id
                         }))
                         print(f"Room {room_id} created with prompts: {prompts}")
                     else:
@@ -65,7 +64,8 @@ async def handle_connection(websocket, path):
                                 }))
                         await websocket.send(json.dumps({
                             "status": "success",
-                            "message": f"Joined room {room_id} successfully"
+                            "message": f"Joined room {room_id} successfully",
+                            "roomId": room_id
                         }))
                         print(f"Client joined room {room_id}")
                     else:
@@ -104,25 +104,17 @@ async def handle_connection(websocket, path):
                         # Decode the base64 image
                         img_bytes = base64.b64decode(image_data.split(",")[1])
                         img = Image.open(BytesIO(img_bytes)).convert('RGBA')  # Match Streamlit app
+                        img.save("check.png")
 
-                        # Remove alpha channel
-                        img = img.convert('RGB')
-
-                        # Pad the image to make it square
+                        
                         img = pad_image_to_square(img)
 
-                        # Ensure that all pixels that are non-black become white
-                        img_array = np.array(img)
-                        mask = (img_array != [0, 0, 0]).any(axis=2)
-                        img_array[mask] = [255, 255, 255]
-                        img = Image.fromarray(img_array)
-
-                        # Optional: Save the processed image for debugging
-                        # img.save("processed_image.png")
+                        
+                        img.save("processed_image.png")
 
                         # Run the ML model inference
                         try:
-                            model_path = "quickdraw_resnet_model.tflite"
+                            model_path = "quickdraw_resnet_model (1).tflite"
                             categories_file = "categories.txt"
                             predicted_category, confidence = predict_from_image(
                                 model_path, img, categories_file=categories_file
@@ -143,69 +135,14 @@ async def handle_connection(websocket, path):
                                         "aiScore": room["scores"]["ai"],
                                         "humanScore": room["scores"]["human"]
                                     }))
-                                # Do not advance to the next level here
                             else:
                                 # Send the AI guess back to the drawer
                                 await websocket.send(json.dumps({
                                     "action": "aiGuess",
                                     "roomId": room_id,
                                     "category": predicted_category,
-                                    "confidence": confidence
+                                    "confidence": str(confidence)
                                 }))
-                        except Exception as e:
-                            print(f"Model inference error: {e}")
-                            await websocket.send(json.dumps({
-                                "status": "error",
-                                "message": "Model inference failed"
-                            }))
-                        # Broadcast the image to other clients in the room
-                        for client in room["clients"]:
-                            if client != websocket:  # Don't send back to the sender
-                                await client.send(json.dumps({
-                                    "action": "imageDeliver",
-                                    "roomId": room_id,
-                                    "imageData": image_data
-                                }))
-                        print(f"Image broadcasted to room {room_id}")
-                    else:
-                        await websocket.send(json.dumps({
-                            "status": "error",
-                            "message": "Room does not exist or invalid image data"
-                        }))
-
-                    print("Received image")
-                    image_data = data.get("imageData")
-                    if room_id in rooms and image_data:
-                        room = rooms[room_id]
-                        # Decode the base64 image
-                        img_bytes = base64.b64decode(image_data.split(",")[1])
-                        img = Image.open(BytesIO(img_bytes)).convert('RGBA')  # Match Streamlit app
-
-                        # Remove alpha channel
-                        img = img.convert('RGB')
-
-                        # Pad the image to make it square
-                        img = pad_image_to_square(img)
-
-                        # Ensure that all pixels that are non-black become white
-                        img_array = np.array(img)
-                        mask = (img_array != [0, 0, 0]).any(axis=2)
-                        img_array[mask] = [255, 255, 255]
-                        img = Image.fromarray(img_array)
-
-                        # Save the processed image for debugging
-                        img.save("processed_image.png")
-
-                        # Run the ML model inference
-                        try:
-                            model_path = "quickdraw_resnet_model.tflite"
-                            categories_file = "categories.txt"
-                            predicted_category, confidence = predict_from_image(
-                                model_path, img, categories_file=categories_file
-                            )
-                            print(f"AI Prediction: {predicted_category} with confidence {confidence:.2f}")
-
-                            # Rest of your code...
                         except Exception as e:
                             print(f"Model inference error: {e}")
                             await websocket.send(json.dumps({
@@ -233,7 +170,7 @@ async def handle_connection(websocket, path):
                     if room_id in rooms and guess:
                         room = rooms[room_id]
                         current_prompt = room["prompts"][room["current_level"]]
-
+                        print(f"Human guess: {guess}, Current prompt: {current_prompt}")
                         # Check if human guessed correctly
                         if guess.strip().lower() == current_prompt.strip().lower():
                             room["scores"]["human"] += 1
@@ -245,40 +182,8 @@ async def handle_connection(websocket, path):
                                     "aiScore": room["scores"]["ai"],
                                     "humanScore": room["scores"]["human"]
                                 }))
-                            # Do not advance to the next level here
                         else:
                             # Send feedback to the guesser
-                            await websocket.send(json.dumps({
-                                "action": "guessFeedback",
-                                "correct": False
-                            }))
-                    else:
-                        await websocket.send(json.dumps({
-                            "status": "error",
-                            "message": "Room does not exist or invalid guess"
-                        }))
-
-                    # Handle human guesses
-                    guess = data.get("guess")
-                    if room_id in rooms and guess:
-                        room = rooms[room_id]
-                        current_prompt = room["prompts"][room["current_level"]]
-
-                        # Check if human guessed correctly
-                        if guess.lower() == current_prompt.lower():
-                            room["scores"]["human"] += 1
-                            # Notify both clients to move to the next level
-                            for client in room["clients"]:
-                                await client.send(json.dumps({
-                                    "action": "levelComplete",
-                                    "winner": "Human",
-                                    "aiScore": room["scores"]["ai"],
-                                    "humanScore": room["scores"]["human"]
-                                }))
-                            # Advance to the next level
-                            # room["current_level"] += 1
-                        else:
-                            # Optionally, you can send feedback to the guesser
                             await websocket.send(json.dumps({
                                 "action": "guessFeedback",
                                 "correct": False
@@ -319,48 +224,13 @@ async def handle_connection(websocket, path):
                             print(f"Game over. Room {room_id} deleted.")
                         else:
                             # Send a message to clients to start the next level
-                            for client in room["clients"]:
+                            next_prompt = room["prompts"][room["current_level"]]
+                            for client in room["clients"][::-1]:
+                                print("sent startLevel")
                                 await client.send(json.dumps({
                                     "action": "startLevel",
-                                    "level": room["current_level"]
-                                }))
-                    else:
-                        await websocket.send(json.dumps({
-                            "status": "error",
-                            "message": "Room does not exist"
-                        }))
-
-                    # Handle moving to the next level
-                    room = rooms.get(room_id)
-                    if room:
-                        if room["current_level"] >= len(room["prompts"]):
-                            # Game over, determine winner
-                            ai_score = room["scores"]["ai"]
-                            human_score = room["scores"]["human"]
-                            if ai_score > human_score:
-                                winner = "AI"
-                            elif human_score > ai_score:
-                                winner = "Human"
-                            else:
-                                winner = "Tie"
-
-                            # Notify both clients of the game result
-                            for client in room["clients"]:
-                                await client.send(json.dumps({
-                                    "action": "gameOver",
-                                    "winner": winner,
-                                    "aiScore": ai_score,
-                                    "humanScore": human_score
-                                }))
-                            # Remove the room from the server
-                            del rooms[room_id]
-                            print(f"Game over. Room {room_id} deleted.")
-                        else:
-                            # Send a message to clients to start the next level
-                            for client in room["clients"]:
-                                await client.send(json.dumps({
-                                    "action": "startLevel",
-                                    "level": room["current_level"] + 1
+                                    "level": room["current_level"] + 1,  # Levels are 1-indexed
+                                    "prompt": next_prompt
                                 }))
                     else:
                         await websocket.send(json.dumps({
