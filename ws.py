@@ -261,8 +261,9 @@ async def handle_connection(websocket):
                     print(f"Room {room_id} deleted")
     except Exception as e:
         print("Error:", e)
-hostname = socket.gethostname()
-local_ip = socket.gethostbyname(hostname)
+s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+s.connect(("8.8.8.8", 80))
+local_ip = s.getsockname()[0]
 # Start the WebSocket server
 async def main():
     async with websockets.serve(handle_connection, local_ip, 8080):
