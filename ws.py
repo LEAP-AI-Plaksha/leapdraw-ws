@@ -3,10 +3,10 @@ import websockets
 import json
 import base64
 from PIL import Image
-import numpy as np
 from io import BytesIO
 from inference import predict_from_image, pad_image_to_square  # Import your ML model inference function
 import random
+import socket
 
 # Load all possible prompts
 with open('categories.txt', 'r') as f:
@@ -15,7 +15,7 @@ with open('categories.txt', 'r') as f:
 # Dictionary to store rooms and their game state
 rooms = {}
 
-async def handle_connection(websocket, path):
+async def handle_connection(websocket):
     print("New client connected")
     
     try:
@@ -25,7 +25,7 @@ async def handle_connection(websocket, path):
                 data = json.loads(message)
                 action = data.get("action")
                 room_id = data.get("roomId")
-                print(action, room_id)
+                print(f"Action: {action}, Room ID: {room_id}")
 
                 if action == "createRoom" and room_id:
                     # Handle room creation
@@ -261,10 +261,12 @@ async def handle_connection(websocket, path):
                     print(f"Room {room_id} deleted")
     except Exception as e:
         print("Error:", e)
-
+hostname = socket.gethostname()
+local_ip = socket.gethostbyname(hostname)
 # Start the WebSocket server
-start_server = websockets.serve(handle_connection, "localhost", 8080)
+async def main():
+    async with websockets.serve(handle_connection, local_ip, 8080):
+       print(f"WebSocket server is running on ws://{local_ip}:8080")
+       await asyncio.Future()  # Run forever
 
-print("WebSocket server is running on ws://localhost:8080")
-asyncio.get_event_loop().run_until_complete(start_server)
-asyncio.get_event_loop().run_forever()
+asyncio.run(main())
