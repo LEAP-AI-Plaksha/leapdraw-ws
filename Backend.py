@@ -36,6 +36,7 @@ async def test_supabase():
 # Store active game rooms and connections
 game_rooms = {}
 ROUND_DURATION = 30  # 30 seconds per round
+MAX_ROUNDS = 3  # Maximum number of round sets (where each player draws once)
 
 def generate_room_id():
     return ''.join(random.choices("0123456789", k=6))  # 6-digit numeric room ID
@@ -83,26 +84,78 @@ async def next_round(room_id):
     Starts the next round and assigns a new drawer.
     """
     if room_id in game_rooms:
-        game_rooms[room_id]['round'] += 1
-        assign_drawer(room_id)  # Reassign drawer
+        room = game_rooms[room_id]
+        room['round'] += 1
+        
+        # If we've gone through all players, increment the round set counter
+        if room['round_players_queue'] is None or not room['round_players_queue']:
+            # Increment the round set counter
+            room['round_set'] += 1
+            
+            # Check if we've reached the maximum number of rounds
+            if room['round_set'] > MAX_ROUNDS:
+                # Game is over, send game end message
+                await broadcast_message(room_id, {
+                    "type": "game_ended",
+                    "final_scores": room['scores']
+                })
+                
+                # Reset game state but keep room open
+                room['game_started'] = False
+                room['drawer'] = None
+                room['current_prompt'] = None
+                room['round'] = 0
+                room['round_set'] = 0
+                
+                print(f"🏁 Game ended in Room {room_id} after {MAX_ROUNDS} rounds")
+                return
+            
+            # Copy all usernames to create a queue of players for this round set
+            room['round_players_queue'] = [client["username"] for client in room['clients']]
+            random.shuffle(room['round_players_queue'])
+            print(f"📋 New drawing queue for round set {room['round_set']} in room {room_id}: {room['round_players_queue']}")
+        
+        # Get the next drawer from the queue
+        if room['round_players_queue']:
+            next_drawer_username = room['round_players_queue'].pop(0)
+            # Find the connection info for this username
+            for client in room['clients']:
+                if client["username"] == next_drawer_username:
+                    room['drawer'] = client
+                    print(f"✏️ New Drawer Assigned: {next_drawer_username}")
+                    break
+            else:
+                # If player no longer in room, recursively call to get next player
+                return await next_round(room_id)
+        else:
+            # Fallback to random assignment if queue is empty
+            assign_drawer(room_id)
         
         # Select a random prompt for the round
         if ALL_PROMPTS:
             current_prompt = random.choice(ALL_PROMPTS)
-            game_rooms[room_id]['current_prompt'] = current_prompt
+            room['current_prompt'] = current_prompt
         else:
-            game_rooms[room_id]['current_prompt'] = "Draw something"
+            room['current_prompt'] = "Draw something"
         
-        print(f"🔄 Starting round {game_rooms[room_id]['round']} in Room {room_id}")
+        # Reset round state
+        room['prompt_guessed'] = False
+        room['correct_guessers'] = set()  # Initialize empty set to track correct guessers
+        room['round_time_remaining'] = ROUND_DURATION
+        
+        print(f"🔄 Starting round {room['round']} (set {room['round_set']}/{MAX_ROUNDS}) in Room {room_id}")
         
         # Send new round info to all clients
-        drawer_username = game_rooms[room_id]['drawer']["username"] if game_rooms[room_id]['drawer'] else None
+        drawer_username = room['drawer']["username"] if room['drawer'] else None
         
         await broadcast_message(room_id, {
             "type": "new_round", 
-            "round": game_rooms[room_id]['round'],
+            "round": room['round'],
+            "round_set": room['round_set'],
+            "max_rounds": MAX_ROUNDS,
             "drawer": drawer_username,
-            "prompt": game_rooms[room_id]['current_prompt']
+            "prompt": room['current_prompt'] if drawer_username and drawer_username == room['drawer']["username"] else "???",
+            "time": ROUND_DURATION
         })
         
         # Start round timer
@@ -112,9 +165,23 @@ async def round_timer(room_id, duration):
     """
     Manages the countdown timer for each round.
     """
+    if room_id not in game_rooms:
+        return
+        
+    room = game_rooms[room_id]
+    
     for remaining in range(duration, 0, -1):
+        # Check if room still exists
         if room_id not in game_rooms:
-            return  # Room was deleted
+            return
+        
+        # Check if everyone except drawer has guessed correctly
+        non_drawer_count = len(room['clients']) - 1  # everyone except drawer
+        if non_drawer_count > 0 and len(room.get('correct_guessers', set())) >= non_drawer_count:
+            print(f"🎯 Everyone guessed correctly in room {room_id}! Ending round early.")
+            break
+        
+        room['round_time_remaining'] = remaining
             
         await broadcast_message(room_id, {
             "type": "timer_update",
@@ -122,8 +189,41 @@ async def round_timer(room_id, duration):
         })
         await asyncio.sleep(1)
     
-    # Time's up for this round
-    await broadcast_message(room_id, {"type": "round_ended"})
+    # Time's up for this round or everyone guessed correctly
+    
+    # Award points to drawer based on how many players guessed correctly
+    if room_id in game_rooms and 'drawer' in room and room['drawer']:
+        drawer_username = room['drawer']["username"]
+        correct_guessers = room.get('correct_guessers', set())
+        
+        # Award 5 points per correct guesser to the drawer
+        drawer_points = len(correct_guessers) * 5
+        
+        if drawer_points > 0 and drawer_username in room['scores']:
+            room['scores'][drawer_username] += drawer_points
+            
+            # Update leaderboard for drawer
+            await update_leaderboard(drawer_username, drawer_points, room_id)
+            
+            # Broadcast drawer points earned
+            await broadcast_message(room_id, {
+                "type": "drawer_points",
+                "username": drawer_username,
+                "points": drawer_points,
+                "num_correct_guesses": len(correct_guessers)
+            })
+    
+    # Send round ended message
+    if room_id in game_rooms:
+        room = game_rooms[room_id]
+        await broadcast_message(room_id, {
+            "type": "round_ended",
+            "reason": "time_up" if room['round_time_remaining'] <= 0 else "all_guessed",
+            "correct_answer": room['current_prompt'],
+            "correct_guessers": list(room.get('correct_guessers', set())),
+            "round_set": room['round_set'],
+            "max_rounds": MAX_ROUNDS
+        })
     
     # Wait a bit before starting next round
     await asyncio.sleep(3)
@@ -177,8 +277,13 @@ async def websocket_endpoint(websocket: WebSocket):
                     'clients': [],
                     'scores': {},
                     'round': 0,
+                    'round_set': 0,  # Track which set of rounds we're on (1-3)
                     'drawer': None,
                     'current_prompt': None,
+                    'prompt_guessed': False,
+                    'correct_guessers': set(),  # Track who has guessed correctly
+                    'round_players_queue': None,
+                    'round_time_remaining': ROUND_DURATION,
                     'game_started': False,
                     'host': None
                 }
@@ -219,8 +324,11 @@ async def websocket_endpoint(websocket: WebSocket):
                         'clients': [],
                         'scores': {},
                         'round': 0,
+                        'round_set': 0,  # Track which set of rounds we're on (1-3)
                         'drawer': None,
                         'current_prompt': None,
+                        'prompt_guessed': False,
+                        'correct_guessers': set(),  # Track who has guessed correctly
                         'game_started': False,
                         'host': None
                     }
@@ -263,6 +371,8 @@ async def websocket_endpoint(websocket: WebSocket):
                     "is_host": game_rooms[room_id]['host'] == username,
                     "game_started": game_rooms[room_id]['game_started'],
                     "round": game_rooms[room_id]['round'],
+                    "round_set": game_rooms[room_id].get('round_set', 0),
+                    "max_rounds": MAX_ROUNDS,
                     "players": list(game_rooms[room_id]['scores'].keys())
                 })
                 
@@ -289,15 +399,22 @@ async def websocket_endpoint(websocket: WebSocket):
                         is_correct_guess = False
                         room = game_rooms[current_room_id]
                         
+                        # Check if it's a correct guess and user hasn't already guessed
                         if (room['game_started'] and 
                             'current_prompt' in room and 
                             room['drawer'] and 
                             room['drawer']["username"] != username and
+                            username not in room.get('correct_guessers', set()) and
                             chat_message.lower() == room['current_prompt'].lower()):
                             
                             points = 10  # Points for correct guess
                             room['scores'][username] += points
                             is_correct_guess = True
+                            
+                            # Add to set of correct guessers rather than ending round
+                            if 'correct_guessers' not in room:
+                                room['correct_guessers'] = set()
+                            room['correct_guessers'].add(username)
                             
                             # Update leaderboard
                             await update_leaderboard(username, points, current_room_id)
@@ -307,7 +424,8 @@ async def websocket_endpoint(websocket: WebSocket):
                             await broadcast_message(current_room_id, {
                                 "type": "correct_guess",
                                 "username": username,
-                                "points": points
+                                "points": points,
+                                "total_correct": len(room['correct_guessers'])
                             })
                         
                         # Don't reveal the answer in chat if it's a correct guess
@@ -324,12 +442,15 @@ async def websocket_endpoint(websocket: WebSocket):
                     room = game_rooms[current_room_id]
                     drawing_data = data.get("data", "")
                     
-                    # Only check drawer permissions if game has started
-                    if (not room['game_started'] or 
-                        (room['drawer'] and room['drawer']["username"] == username)):
+                    # Only the drawer can send drawing data during an active game
+                    # and only if the prompt hasn't been guessed yet
+                    if (room['game_started'] and 
+                        room['drawer'] and 
+                        room['drawer']["username"] == username and
+                        not room.get('prompt_guessed', False)):
+                        
                         if drawing_data:
                             # Broadcast drawing to all clients except the drawer
-                            # Use 'draw_update' type for test compatibility
                             await broadcast_message(current_room_id, {
                                 "type": "draw_update",
                                 "data": drawing_data
@@ -337,9 +458,13 @@ async def websocket_endpoint(websocket: WebSocket):
                 
                 elif message_type == "clear_canvas":
                     room = game_rooms[current_room_id]
-                    # Only check drawer permissions if game has started
-                    if (not room['game_started'] or 
-                        (room['drawer'] and room['drawer']["username"] == username)):
+                    # Only the drawer can clear the canvas during an active game
+                    # and only if the prompt hasn't been guessed yet
+                    if (room['game_started'] and 
+                        room['drawer'] and 
+                        room['drawer']["username"] == username and
+                        not room.get('prompt_guessed', False)):
+                        
                         # Broadcast clear canvas command to all clients
                         await broadcast_message(current_room_id, {
                             "type": "clear_canvas"
@@ -349,8 +474,63 @@ async def websocket_endpoint(websocket: WebSocket):
                     room = game_rooms[current_room_id]
                     # Only the host can start the game
                     if room['host'] == username and not room['game_started']:
+                        # Need at least 2 players to start
+                        if len(room['clients']) < 2:
+                            await websocket.send_json({
+                                "type": "error",
+                                "message": "Need at least 2 players to start"
+                            })
+                            continue
+                        
                         room['game_started'] = True
+                        # Initialize empty queue - will be populated in next_round
+                        room['round_players_queue'] = []
+                        # Reset round set counter
+                        room['round_set'] = 1  # Start with round set 1
+                        room['round'] = 0  # Will be incremented in next_round
+                        
                         print(f"✅ Game started in Room {current_room_id} by host {username}")
+                        
+                        # Broadcast game start to all clients
+                        await broadcast_message(current_room_id, {
+                            "type": "game_started",
+                            "max_rounds": MAX_ROUNDS
+                        })
+                        
+                        # Start the first round
+                        await next_round(current_room_id)
+                
+                elif message_type == "restart_game":
+                    room = game_rooms[current_room_id]
+                    # Only the host can restart the game, and only if the game is not in progress
+                    if room['host'] == username and not room['game_started']:
+                        # Need at least 2 players to start
+                        if len(room['clients']) < 2:
+                            await websocket.send_json({
+                                "type": "error",
+                                "message": "Need at least 2 players to start"
+                            })
+                            continue
+                        
+                        # Reset scores
+                        for player in room['scores']:
+                            room['scores'][player] = 0
+                        
+                        # Start a new game
+                        room['game_started'] = True
+                        room['round_players_queue'] = []
+                        room['round_set'] = 1  # Start with round set 1
+                        room['round'] = 0  # Will be incremented in next_round
+                        
+                        print(f"🔄 Game restarted in Room {current_room_id} by host {username}")
+                        
+                        # Broadcast game restart to all clients
+                        await broadcast_message(current_room_id, {
+                            "type": "game_restarted",
+                            "max_rounds": MAX_ROUNDS
+                        })
+                        
+                        # Start the first round
                         await next_round(current_room_id)
                 
                 elif message_type == "leave_room":
@@ -392,6 +572,10 @@ async def handle_disconnect(room_id, username, websocket):
         # Update scores dictionary if the user was in it
         if username in room['scores']:
             del room['scores'][username]
+        
+        # Remove user from correct guessers if they were in it
+        if 'correct_guessers' in room and username in room['correct_guessers']:
+            room['correct_guessers'].remove(username)
             
         # Notify other players
         await broadcast_message(room_id, {
@@ -415,11 +599,25 @@ async def handle_disconnect(room_id, username, websocket):
                 "username": new_host
             })
         
-        # If game in progress and drawer left, start a new round
+        # If game in progress and drawer left, end the round and go to next drawer
         if (room['game_started'] and room['drawer'] and 
             room['drawer']["username"] == username and room['clients']):
+            
+            # Send message that drawer left
+            await broadcast_message(room_id, {
+                "type": "drawer_left",
+                "username": username
+            })
+            
             print(f"🎨 Drawer {username} left during the game, starting new round")
+            
+            # Wait a moment before starting new round
+            await asyncio.sleep(2)
             await next_round(room_id)
+        
+        # If player was in the queue, remove them
+        if 'round_players_queue' in room and username in room['round_players_queue']:
+            room['round_players_queue'].remove(username)
         
         # Clean up empty rooms
         if not room['clients']:
