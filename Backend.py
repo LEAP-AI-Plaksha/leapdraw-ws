@@ -36,7 +36,7 @@ async def test_supabase():
 # Store active game rooms and connections
 game_rooms = {}
 ROUND_DURATION = 30  # 30 seconds per round
-MAX_ROUNDS = 3  # Maximum number of round sets (where each player draws once)
+MAX_ROUNDS = 2  # Maximum number of round sets (where each player draws once)
 
 def generate_room_id():
     return ''.join(random.choices("0123456789", k=6))  # 6-digit numeric room ID
@@ -79,6 +79,49 @@ def direct_broadcast(room_id, message, exclude_username=None):
                                          exclude=[c for c in game_rooms.get(room_id, {}).get('clients', []) 
                                                  if c.get('username') == exclude_username]))
 
+async def save_final_scores(room_id):
+    """
+    Saves the final scores to Supabase at the end of the game.
+    Increments existing totals for each player.
+    """
+    if room_id not in game_rooms:
+        return
+        
+    room = game_rooms[room_id]
+    
+    for username, score in room['scores'].items():
+        if score <= 0:
+            continue  # Skip users with no points
+            
+        try:
+            # Check if user exists in user_stats table
+            response = supabase.table("user_stats").select("id", "total_score", "games_played").eq("username", username).execute()
+            
+            if response.data:
+                # User exists, update their stats
+                user_id = response.data[0]["id"]
+                current_score = response.data[0]["total_score"]
+                games_played = response.data[0]["games_played"]
+                
+                # Update with incremented values
+                supabase.table("user_stats").update({
+                    "total_score": current_score + score,
+                    "games_played": games_played + 1
+                }).eq("id", user_id).execute()
+                
+                print(f"📊 Updated stats for {username}: +{score} points, now has {current_score + score} total")
+            else:
+                # New user, create entry
+                supabase.table("user_stats").insert({
+                    "username": username,
+                    "total_score": score,
+                    "games_played": 1
+                }).execute()
+                
+                print(f"📊 Created stats for new user {username}: {score} points")
+        except Exception as e:
+            print(f"❌ Error saving final score for {username}: {e}")
+
 async def next_round(room_id):
     """
     Starts the next round and assigns a new drawer.
@@ -94,6 +137,9 @@ async def next_round(room_id):
             
             # Check if we've reached the maximum number of rounds
             if room['round_set'] > MAX_ROUNDS:
+                # Save final scores to database before ending the game
+                await save_final_scores(room_id)
+                
                 # Game is over, send game end message
                 await broadcast_message(room_id, {
                     "type": "game_ended",
@@ -216,7 +262,7 @@ async def round_timer(room_id, duration):
     # Send round ended message
     if room_id in game_rooms:
         room = game_rooms[room_id]
-        await broadcast_message(room_id, {
+        await broadcast_message(room_id, { 
             "type": "round_ended",
             "reason": "time_up" if room['round_time_remaining'] <= 0 else "all_guessed",
             "correct_answer": room['current_prompt'],
