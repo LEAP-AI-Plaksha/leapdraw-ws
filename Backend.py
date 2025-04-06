@@ -8,6 +8,12 @@ from pydantic import BaseModel
 from supabase import create_client, Client
 import os
 load_dotenv()
+
+# AI player constants
+AI_PLAYER_NAME = "AI"  # Default name for the AI player
+AI_GUESS_DELAY_MIN = 3  # Minimum seconds before AI makes a guess
+AI_GUESS_DELAY_MAX = 10  # Maximum seconds before AI makes a guess
+
 # Load from environment variables
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY")
@@ -69,6 +75,8 @@ def create_test_room(room_id):
             'game_started': False,
             'host': None
         }
+        # Add AI player to test rooms
+        add_ai_player(room_id)
         return True
     return False
 
@@ -157,7 +165,8 @@ async def next_round(room_id):
                 return
             
             # Copy all usernames to create a queue of players for this round set
-            room['round_players_queue'] = [client["username"] for client in room['clients']]
+            room['round_players_queue'] = [client["username"] for client in room['clients'] 
+                                          if not client.get("is_ai", False)]  # Exclude AI player from drawing
             random.shuffle(room['round_players_queue'])
             print(f"📋 New drawing queue for round set {room['round_set']} in room {room_id}: {room['round_players_queue']}")
         
@@ -336,6 +345,9 @@ async def websocket_endpoint(websocket: WebSocket):
                 
                 print(f"🚀 Room {room_id} Created")
                 
+                # Add AI player to the room
+                add_ai_player(room_id)
+                
                 # Tell client about successful room creation
                 await websocket.send_json({
                     "type": "room_created",
@@ -378,6 +390,9 @@ async def websocket_endpoint(websocket: WebSocket):
                         'game_started': False,
                         'host': None
                     }
+                    
+                    # Add AI player to the room
+                    add_ai_player(room_id)
                 
                 # Check if game already started
                 if game_rooms[room_id]['game_started']:
@@ -501,6 +516,9 @@ async def websocket_endpoint(websocket: WebSocket):
                                 "type": "draw_update",
                                 "data": drawing_data
                             }, exclude=[connection_info])
+                            
+                            # Trigger AI player to make a guess
+                            asyncio.create_task(ai_make_guess(current_room_id))
                 
                 elif message_type == "clear_canvas":
                     room = game_rooms[current_room_id]
@@ -721,6 +739,10 @@ async def broadcast_message(room_id, message, exclude=None):
             if client in exclude:
                 continue
                 
+            # Skip AI players as they don't have websockets
+            if client.get("is_ai", False):
+                continue
+                
             try:
                 await client["websocket"].send_json(message)
             except Exception as e:
@@ -731,3 +753,101 @@ async def broadcast_message(room_id, message, exclude=None):
                 # If the client was in scores, remove them
                 if client["username"] in game_rooms[room_id]['scores']:
                     del game_rooms[room_id]['scores'][client["username"]]
+
+def add_ai_player(room_id):
+    """
+    Adds an AI player to the specified room
+    """
+    if room_id in game_rooms:
+        room = game_rooms[room_id]
+        
+        # Check if AI player already exists in the room
+        if any(client.get("username") == AI_PLAYER_NAME for client in room['clients']):
+            # AI player already in the room
+            return
+        
+        # Create AI player connection info (without a websocket)
+        ai_connection = {"username": AI_PLAYER_NAME, "is_ai": True}
+        
+        # Add AI player to room
+        room['clients'].append(ai_connection)
+        room['scores'][AI_PLAYER_NAME] = 0
+        
+        print(f"🤖 AI player added to room {room_id}")
+        
+        # Broadcast to all clients about the new AI player
+        asyncio.create_task(broadcast_message(room_id, {
+            "type": "player_joined", 
+            "username": AI_PLAYER_NAME,
+            "is_ai": True
+        }))
+        
+        # Send updated player list to all clients
+        player_list = list(room['scores'].keys())
+        asyncio.create_task(broadcast_message(room_id, {
+            "type": "player_list_update", 
+            "players": player_list
+        }))
+
+async def ai_make_guess(room_id):
+    """
+    Have the AI player make a guess based on the drawing
+    For now, it always guesses "cat"
+    """
+    if room_id not in game_rooms:
+        return
+        
+    room = game_rooms[room_id]
+    
+    # Only guess if AI player is in the room, not the drawer, and hasn't guessed correctly yet
+    if (AI_PLAYER_NAME not in [c.get("username") for c in room['clients']] or 
+        (room['drawer'] and room['drawer'].get("username") == AI_PLAYER_NAME) or
+        AI_PLAYER_NAME in room.get('correct_guessers', set())):
+        return
+    
+    # Random delay to make the AI seem more human-like
+    await asyncio.sleep(random.uniform(AI_GUESS_DELAY_MIN, AI_GUESS_DELAY_MAX))
+    
+    # If the room no longer exists or AI has already guessed correctly, abort
+    if (room_id not in game_rooms or 
+        AI_PLAYER_NAME in game_rooms[room_id].get('correct_guessers', set())):
+        return
+        
+    room = game_rooms[room_id]
+    
+    # AI always guesses "cat" for now - this will be replaced with model integration
+    ai_guess = "cat"
+    
+    # Check if the guess is correct
+    is_correct = ai_guess.lower() == room['current_prompt'].lower()
+    
+    # Broadcast AI's guess to all clients
+    await broadcast_message(room_id, {
+        "type": "chat_message",
+        "username": AI_PLAYER_NAME,
+        "message": ai_guess,
+        "is_ai": True
+    })
+    
+    # If guess is correct, handle scoring
+    if is_correct:
+        points = 10  # Points for correct guess
+        room['scores'][AI_PLAYER_NAME] += points
+        
+        # Add to set of correct guessers
+        if 'correct_guessers' not in room:
+            room['correct_guessers'] = set()
+        room['correct_guessers'].add(AI_PLAYER_NAME)
+        
+        # Update leaderboard
+        await update_leaderboard(AI_PLAYER_NAME, points, room_id)
+        await broadcast_leaderboard(room_id)
+        
+        # Broadcast message about correct guess
+        await broadcast_message(room_id, {
+            "type": "correct_guess",
+            "username": AI_PLAYER_NAME,
+            "points": points,
+            "total_correct": len(room['correct_guessers']),
+            "is_ai": True
+        })
