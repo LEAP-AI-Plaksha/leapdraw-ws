@@ -5,13 +5,22 @@ import asyncio
 from dotenv import load_dotenv
 from supabase import create_client, Client
 
+import numpy as np
+from data import class_dict
+import matplotlib.pyplot as plt
+import cv2
+from tensorflow.keras.models import load_model
+reverse_dict = {v: k for k, v in class_dict.items()}
+
 load_dotenv()
 
 # AI player constants
 AI_PLAYER_NAME = "AI"  # Default name for the AI player
 AI_GUESS_DELAY_MIN = 3  # Minimum seconds before AI makes a guess
 AI_GUESS_DELAY_MAX = 10  # Maximum seconds before AI makes a guess
+AI_MODEL_PATH = 'model.h5'  # Path to ML model (set to None for now)
 
+model = load_model(AI_MODEL_PATH)
 # Load from environment variables
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY")
@@ -43,6 +52,146 @@ async def test_supabase():
 game_rooms = {}
 ROUND_DURATION = 30  # 30 seconds per round
 MAX_ROUNDS = 2  # Maximum number of round sets (where each player draws once)
+def process_tldraw_snapshot(tldraw_snapshot, size=80, lw=6, BASE_SIZE=256, debug=False):
+    # Create a blank canvas
+    img = np.zeros((BASE_SIZE, BASE_SIZE), np.uint8)
+
+    # Parse the JSON if it's a string
+    if isinstance(tldraw_snapshot, str):
+        tldraw_snapshot = json.loads(tldraw_snapshot)
+
+    if debug:
+        print("Processing tldraw data...")
+
+    # Collect all strokes from shapes
+    strokes = []  # Each stroke is a list of (x, y) tuples in global coordinates
+    if "store" in tldraw_snapshot:
+        store = tldraw_snapshot["store"]
+        for key, shape in store.items():
+            if key.startswith("shape:") and shape.get("type") == "draw":
+                base_x = shape.get("x", 0)
+                base_y = shape.get("y", 0)
+                segments = shape.get("props", {}).get("segments", [])
+                for segment in segments:
+                    if segment.get("type") == "free":
+                        points = segment.get("points", [])
+                        if points and len(points) > 1:
+                            # Offset each point using the shape's base position
+                            stroke = [
+                                (base_x + pt.get("x", 0), base_y + pt.get("y", 0))
+                                for pt in points
+                            ]
+                            strokes.append(stroke)
+                            if debug:
+                                print(
+                                    f"Collected stroke with {len(stroke)} points from shape {shape.get('id')}"
+                                )
+
+    if debug:
+        print(f"Total strokes collected: {len(strokes)}")
+
+    if not strokes:
+        if debug:
+            print("No strokes found in the data")
+        return img
+
+    # Compute global bounding box for all strokes
+    all_points = np.array([pt for stroke in strokes for pt in stroke])
+    global_min_x = np.min(all_points[:, 0])
+    global_max_x = np.max(all_points[:, 0])
+    global_min_y = np.min(all_points[:, 1])
+    global_max_y = np.max(all_points[:, 1])
+    if debug:
+        print(
+            f"Global bounding box: x=({global_min_x}, {global_max_x}), y=({global_min_y}, {global_max_y})"
+        )
+
+    global_width = max(1, global_max_x - global_min_x)  # Avoid division by zero
+    global_height = max(1, global_max_y - global_min_y)
+
+    # Determine scale factor to fit the global drawing into the canvas with a margin (e.g. 80% of BASE_SIZE)
+    scale_factor = min(BASE_SIZE * 0.8 / global_width, BASE_SIZE * 0.8 / global_height)
+    # Compute offsets to center the drawing on the canvas
+    offset_x = (BASE_SIZE - (global_width * scale_factor)) / 2
+    offset_y = (BASE_SIZE - (global_height * scale_factor)) / 2
+
+    if debug:
+        print(
+            f"Scale factor: {scale_factor:.2f}, Offset: ({offset_x:.2f}, {offset_y:.2f})"
+        )
+
+    # Now draw each stroke on the image canvas
+    for stroke in strokes:
+        # Transform each point with the global transformation
+        transformed_points = []
+        for x, y in stroke:
+            tx = int((x - global_min_x) * scale_factor + offset_x)
+            ty = int((y - global_min_y) * scale_factor + offset_y)
+            transformed_points.append((tx, ty))
+        # Draw lines connecting consecutive points
+        for i in range(len(transformed_points) - 1):
+            cv2.line(img, transformed_points[i], transformed_points[i + 1], 255, lw)
+
+    # Resize to target size for the model
+    img_resized = cv2.resize(img, (size, size))
+
+    if debug:
+        plt.figure(figsize=(5, 5))
+        plt.imshow(img_resized, cmap="gray")
+        plt.title("Processed Drawing")
+        plt.axis("off")
+        plt.show()
+
+    # Normalize and reshape for model input
+    img_normalized = img_resized / 255.0
+    img_normalized = img_normalized.reshape((1, size, size, 1)).astype(np.float32)
+
+    return img_normalized
+
+
+def predict_from_tldraw_file(tldraw_data, size=80):
+    """
+    Make a prediction using a tldraw JSON file.
+
+    Parameters:
+    - json_file_path: Path to tldraw JSON file
+    - model_path: Path to the trained model (.h5 file)
+    - class_dict_path: Optional path to saved class dictionary
+    - size: Input size expected by the model
+
+    Returns:
+    - Top 3 class predictions and their probabilities
+    """
+    # Load class dictionary if provided
+
+    if not reverse_dict:
+        n_classes = model.output_shape[1]  # Number of output classes
+        reverse_dict = {i: f"Class_{i}" for i in range(n_classes)}
+
+    # Process the image from tldraw snapshot
+    processed_image = process_tldraw_snapshot(tldraw_data, size=size)
+
+    # Make a prediction
+    prediction = model.predict(processed_image)
+
+    # Get top 3 predictions
+    top_3_indices = np.argsort(-prediction)[0, :3]
+    top_3_probabilities = prediction[0, top_3_indices]
+    top_3_classes = [reverse_dict[idx] for idx in top_3_indices]
+
+    # Display the processed image with the top prediction
+    plt.figure(figsize=(5, 5))
+    plt.imshow(processed_image[0, :, :, 0], cmap="gray")
+    plt.title(f"Top prediction: {top_3_classes[0]}")
+    plt.axis("off")
+    plt.show()
+
+    print("Top 3 predictions:")
+    for i in range(3):
+        print(f"{i+1}. {top_3_classes[i]} (Probability: {top_3_probabilities[i]:.4f})")
+
+    return top_3_classes, top_3_probabilities
+
 
 
 def generate_room_id():
@@ -583,8 +732,8 @@ async def websocket_endpoint(websocket: WebSocket):
                                 exclude=[connection_info],
                             )
 
-                            # Trigger AI player to make a guess
-                            asyncio.create_task(ai_make_guess(current_room_id))
+                            # Trigger AI player to make a guess with the drawing data
+                            asyncio.create_task(ai_make_guess(current_room_id, drawing_data))
 
                 elif message_type == "clear_canvas":
                     room = game_rooms[current_room_id]
@@ -900,16 +1049,61 @@ def add_ai_player(room_id):
         )
 
 
-async def ai_make_guess(room_id):
+def get_ai_prediction(drawing_data):
+    """
+    Process drawing data and return a prediction
+    """
+    try:
+        if AI_MODEL_PATH and drawing_data:
+            print(f"🤖 Processing drawing data for AI prediction")
+            
+            # Process the drawing data - make sure it's in the correct format
+            try:
+                # Parse JSON if it's a string
+                if isinstance(drawing_data, str):
+                    drawing_data = json.loads(drawing_data)
+                
+                # Process the image with correct dimensions
+                processed_image = process_tldraw_snapshot(drawing_data, size=80)
+                
+                # Verify the shape before prediction
+                if processed_image is not None:
+                    input_shape = processed_image.shape
+                    print(f"🤖 Processed image shape: {input_shape}")
+                    
+                    if len(input_shape) == 4 and input_shape[1:] == (80, 80, 1):
+                        # Make prediction
+                        prediction = model.predict(processed_image, verbose=0)
+                        
+                        # Get top prediction
+                        if class_dict:
+                            top_index = np.argmax(prediction[0])
+                            print(top_index)
+                            predicted_class = reverse_dict.get((top_index), "unknown")
+                            print(f"🤖 AI predicted: {predicted_class}")
+                            return predicted_class.lower()
+                    else:
+                        print(f"🤖 Incorrect image shape: {input_shape}, expected (batch, 80, 80, 1)")
+                else:
+                    print("🤖 Failed to process image - null result")
+            except Exception as e:
+                print(f"🤖 Error processing drawing: {str(e)}")
+        
+        # Default to "cat" if no model or prediction fails
+        return "cat"
+    except Exception as e:
+        print(f"🤖 AI prediction error: {e}")
+        return "cat"  # Default fallback
+
+async def ai_make_guess(room_id, drawing_data=None):
     """
     Have the AI player make a guess based on the drawing
-    For now, it always guesses "cat"
+    Uses the drawing data to generate a more accurate guess
     """
     if room_id not in game_rooms:
         return
 
     room = game_rooms[room_id]
-
     # Only guess if AI player is in the room, not the drawer, and hasn't guessed correctly yet
     if (
         AI_PLAYER_NAME not in [c.get("username") for c in room["clients"]]
@@ -929,8 +1123,11 @@ async def ai_make_guess(room_id):
 
     room = game_rooms[room_id]
 
-    # AI always guesses "cat" for now - this will be replaced with model integration
-    ai_guess = "cat"
+    # Generate AI guess based on drawing data - only if we have valid drawing data
+    if drawing_data:
+        ai_guess = get_ai_prediction(drawing_data)
+    else:
+        ai_guess = "cat"  # Fallback to default
 
     if not room["current_prompt"]:
         return
