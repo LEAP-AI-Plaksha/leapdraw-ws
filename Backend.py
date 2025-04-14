@@ -1153,7 +1153,7 @@ async def ai_make_guess(room_id, drawing_data=None):
         {
             "type": "chat_message",
             "username": AI_PLAYER_NAME,
-            "message": ai_guess,
+            "message": ai_guess.replace("_", " "),
             "is_ai": True,
         },
     )
