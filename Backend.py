@@ -5,7 +5,6 @@ import asyncio
 from dotenv import load_dotenv
 from supabase import create_client, Client
 import json
-
 import numpy as np
 from data import class_dict
 import matplotlib.pyplot as plt
@@ -42,12 +41,6 @@ except FileNotFoundError:
     print("Warning: categories.txt not found, using default prompts")
 
 app = FastAPI()
-
-
-@app.get("/test_supabase")
-async def test_supabase():
-    response = supabase.table("leaderboard").select("*").limit(5).execute()
-    return response.data  # Should return some records if everything is connected
 
 
 # Store active game rooms and connections
@@ -567,7 +560,7 @@ async def websocket_endpoint(websocket: WebSocket):
 
                 # Get room ID and username from request
                 room_id = data.get("room_id")
-                new_username = data.get("username")
+                new_username = str(data.get("username", "")).strip()
 
                 if not room_id or not new_username:
                     await websocket.send_json(
@@ -575,24 +568,16 @@ async def websocket_endpoint(websocket: WebSocket):
                     )
                     continue
 
+                try:
+                    room_id = int(room_id)
+                except Exception:
+                    await websocket.send_json(
+                        {"type": "error", "message": "Invalid room_id"}
+                    )
+                    continue
+
                 # Check if room exists
                 if room_id not in game_rooms:
-                    # Create the room if it doesn't exist (for testing)
-                    # game_rooms[room_id] = {
-                    #     'clients': [],
-                    #     'scores': {},
-                    #     'round': 0,
-                    #     'round_set': 0,  # Track which set of rounds we're on (1-3)
-                    #     'drawer': None,
-                    #     'current_prompt': None,
-                    #     'prompt_guessed': False,
-                    #     'correct_guessers': set(),  # Track who has guessed correctly
-                    #     'game_started': False,
-                    #     'host': None
-                    # }
-
-                    # Add AI player to the room
-                    # add_ai_player(room_id)
                     await websocket.send_json(
                         {"type": "error", "message": "Room not found"}
                     )
@@ -602,6 +587,16 @@ async def websocket_endpoint(websocket: WebSocket):
                 if game_rooms[room_id]["game_started"]:
                     await websocket.send_json(
                         {"type": "error", "message": "Game already started"}
+                    )
+                    continue
+
+                # Check if user is not AI username
+                if new_username.lower() == AI_PLAYER_NAME.lower():
+                    await websocket.send_json(
+                        {
+                            "type": "error",
+                            "message": "This username is not allowed",
+                        }
                     )
                     continue
 
@@ -1146,8 +1141,6 @@ async def ai_make_guess(room_id, drawing_data=None):
 
     # Check if the guess is correct
     is_correct = ai_guess.lower() == str(room["current_prompt"]).lower()
-
-
 
     # If guess is correct, handle scoring
     if is_correct:
