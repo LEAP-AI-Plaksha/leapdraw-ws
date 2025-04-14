@@ -4,12 +4,14 @@ import random
 import asyncio
 from dotenv import load_dotenv
 from supabase import create_client, Client
+import json
 
 import numpy as np
 from data import class_dict
 import matplotlib.pyplot as plt
 import cv2
 from tensorflow.keras.models import load_model
+
 reverse_dict = {v: k for k, v in class_dict.items()}
 
 load_dotenv()
@@ -18,7 +20,7 @@ load_dotenv()
 AI_PLAYER_NAME = "AI"  # Default name for the AI player
 AI_GUESS_DELAY_MIN = 3  # Minimum seconds before AI makes a guess
 AI_GUESS_DELAY_MAX = 10  # Maximum seconds before AI makes a guess
-AI_MODEL_PATH = 'model.h5'  # Path to ML model (set to None for now)
+AI_MODEL_PATH = "model.h5"  # Path to ML model (set to None for now)
 
 model = load_model(AI_MODEL_PATH)
 # Load from environment variables
@@ -51,7 +53,9 @@ async def test_supabase():
 # Store active game rooms and connections
 game_rooms = {}
 ROUND_DURATION = 30  # 30 seconds per round
-MAX_ROUNDS = 2  # Maximum number of round sets (where each player draws once)
+MAX_ROUNDS = 4  # Maximum number of round sets (where each player draws once)
+
+
 def process_tldraw_snapshot(tldraw_snapshot, size=80, lw=6, BASE_SIZE=256, debug=False):
     # Create a blank canvas
     img = np.zeros((BASE_SIZE, BASE_SIZE), np.uint8)
@@ -188,10 +192,11 @@ def predict_from_tldraw_file(tldraw_data, size=80):
 
     print("Top 3 predictions:")
     for i in range(3):
-        print(f"{i+1}. {top_3_classes[i]} (Probability: {top_3_probabilities[i]:.4f})")
+        print(
+            f"{i + 1}. {top_3_classes[i]} (Probability: {top_3_probabilities[i]:.4f})"
+        )
 
     return top_3_classes, top_3_probabilities
-
 
 
 def generate_room_id():
@@ -465,6 +470,7 @@ async def round_timer(room_id, duration):
 
     # Send round ended message
     if room_id in game_rooms:
+        await asyncio.sleep(1)
         room = game_rooms[room_id]
         await broadcast_message(
             room_id,
@@ -733,7 +739,9 @@ async def websocket_endpoint(websocket: WebSocket):
                             )
 
                             # Trigger AI player to make a guess with the drawing data
-                            asyncio.create_task(ai_make_guess(current_room_id, drawing_data))
+                            asyncio.create_task(
+                                ai_make_guess(current_room_id, drawing_data)
+                            )
 
                 elif message_type == "clear_canvas":
                     room = game_rooms[current_room_id]
@@ -1055,26 +1063,26 @@ def get_ai_prediction(drawing_data):
     """
     try:
         if AI_MODEL_PATH and drawing_data:
-            print(f"🤖 Processing drawing data for AI prediction")
-            
+            print("🤖 Processing drawing data for AI prediction")
+
             # Process the drawing data - make sure it's in the correct format
             try:
                 # Parse JSON if it's a string
                 if isinstance(drawing_data, str):
                     drawing_data = json.loads(drawing_data)
-                
+
                 # Process the image with correct dimensions
                 processed_image = process_tldraw_snapshot(drawing_data, size=80)
-                
+
                 # Verify the shape before prediction
                 if processed_image is not None:
                     input_shape = processed_image.shape
                     print(f"🤖 Processed image shape: {input_shape}")
-                    
+
                     if len(input_shape) == 4 and input_shape[1:] == (80, 80, 1):
                         # Make prediction
                         prediction = model.predict(processed_image, verbose=0)
-                        
+
                         # Get top prediction
                         if class_dict:
                             top_index = np.argmax(prediction[0])
@@ -1083,17 +1091,20 @@ def get_ai_prediction(drawing_data):
                             print(f"🤖 AI predicted: {predicted_class}")
                             return predicted_class.lower()
                     else:
-                        print(f"🤖 Incorrect image shape: {input_shape}, expected (batch, 80, 80, 1)")
+                        print(
+                            f"🤖 Incorrect image shape: {input_shape}, expected (batch, 80, 80, 1)"
+                        )
                 else:
                     print("🤖 Failed to process image - null result")
             except Exception as e:
                 print(f"🤖 Error processing drawing: {str(e)}")
-        
+
         # Default to "cat" if no model or prediction fails
         return "cat"
     except Exception as e:
         print(f"🤖 AI prediction error: {e}")
         return "cat"  # Default fallback
+
 
 async def ai_make_guess(room_id, drawing_data=None):
     """
@@ -1112,8 +1123,9 @@ async def ai_make_guess(room_id, drawing_data=None):
     ):
         return
 
-    # Random delay to make the AI seem more human-like
-    await asyncio.sleep(random.uniform(AI_GUESS_DELAY_MIN, AI_GUESS_DELAY_MAX))
+    # 1 / 10 chance to make a guess
+    if random.random() > 1 / 10:
+        return
 
     # If the room no longer exists or AI has already guessed correctly, abort
     if room_id not in game_rooms or AI_PLAYER_NAME in game_rooms[room_id].get(
