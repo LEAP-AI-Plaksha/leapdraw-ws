@@ -1147,16 +1147,7 @@ async def ai_make_guess(room_id, drawing_data=None):
     # Check if the guess is correct
     is_correct = ai_guess.lower() == str(room["current_prompt"]).lower()
 
-    # Broadcast AI's guess to all clients
-    await broadcast_message(
-        room_id,
-        {
-            "type": "chat_message",
-            "username": AI_PLAYER_NAME,
-            "message": ai_guess,
-            "is_ai": True,
-        },
-    )
+
 
     # If guess is correct, handle scoring
     if is_correct:
@@ -1180,6 +1171,17 @@ async def ai_make_guess(room_id, drawing_data=None):
                 "username": AI_PLAYER_NAME,
                 "points": points,
                 "total_correct": len(room["correct_guessers"]),
+                "is_ai": True,
+            },
+        )
+    else:
+        # Broadcast AI's guess to all clients
+        await broadcast_message(
+            room_id,
+            {
+                "type": "chat_message",
+                "username": AI_PLAYER_NAME,
+                "message": ai_guess,
                 "is_ai": True,
             },
         )
