@@ -1137,7 +1137,7 @@ async def ai_make_guess(room_id, drawing_data=None):
 
     # Generate AI guess based on drawing data - only if we have valid drawing data
     if drawing_data:
-        ai_guess = get_ai_prediction(drawing_data)
+        ai_guess = get_ai_prediction(drawing_data).replace("_", " ")
     else:
         ai_guess = "cat"  # Fallback to default
 
@@ -1153,7 +1153,7 @@ async def ai_make_guess(room_id, drawing_data=None):
         {
             "type": "chat_message",
             "username": AI_PLAYER_NAME,
-            "message": ai_guess.replace("_", " "),
+            "message": ai_guess,
             "is_ai": True,
         },
     )
