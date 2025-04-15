@@ -160,6 +160,7 @@ def predict_from_tldraw_file(tldraw_data, size=80):
     - Top 3 class predictions and their probabilities
     """
     # Load class dictionary if provided
+    global reverse_dict
 
     if not reverse_dict:
         n_classes = model.output_shape[1]  # Number of output classes
