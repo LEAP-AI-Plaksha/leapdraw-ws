@@ -79,7 +79,6 @@ pytest==8.3.5
 pytest-mock==3.14.0
 python-dateutil==2.9.0.post0
 python-dotenv==1.1.0
-pywin32==310
 pyzmq==26.4.0
 realtime==2.4.2
 requests==2.32.3
@@ -96,7 +95,6 @@ tensorboard==2.18.0
 tensorboard-data-server==0.7.2
 tensorflow==2.18.0
 tensorflow-io-gcs-filesystem==0.31.0
-tensorflow_intel==2.18.0
 termcolor==3.0.1
 tomli==2.2.1
 tornado==6.4.2
